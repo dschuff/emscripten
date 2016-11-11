@@ -28,6 +28,7 @@ class Benchmarker:
     for i in range(reps):
       start = time.time()
       output = self.run(args)
+      print output
       if not output_parser:
         if IGNORE_COMPILATION:
           curr = float(re.search('took +([\d\.]+) milliseconds', output).group(1)) / 1000
@@ -123,6 +124,7 @@ process(sys.argv[1])
                     #'--profiling',
                     #'--closure', '1',
                     '-o', final] + shared_args + emcc_args + self.extra_args, stdout=PIPE, stderr=PIPE, env=self.env).communicate()
+    print output[0], output[1]
     assert os.path.exists(final), 'Failed to compile file: ' + output[0] + ' (looked for ' + final + ')'
     self.filename = final
 
@@ -136,8 +138,9 @@ try:
     NativeBenchmarker('clang', CLANG_CC, CLANG),
     #JSBenchmarker('sm-asmjs', SPIDERMONKEY_ENGINE, ['-s', 'PRECISE_F32=2']),
     #JSBenchmarker('sm-wasm',  SPIDERMONKEY_ENGINE, ['-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1']),
-    JSBenchmarker('v8-wasm',  V8_ENGINE,           ['-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1']),
+    JSBenchmarker('v8-wasm',  V8_ENGINE,           ['-O0', '-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1']),
     JSBenchmarker('v8-asmjs',  V8_ENGINE,           []),
+    #JSBenchmarker('v8-asmjs-separated',  V8_ENGINE,      ['--separate-asm']),
   ]
 except Exception, e:
   benchmarkers_error = str(e)
@@ -642,4 +645,3 @@ class benchmark(RunnerCore):
     def lib_builder(name, native, env_init):
       return self.get_library('lzma', [os.path.join('lzma.a')], configure=None, native=native, cache_name_extra=name, env_init=env_init)
     self.do_benchmark('lzma', src, 'ok.', shared_args=['-I' + path_from_root('tests', 'lzma')], lib_builder=lib_builder)
-
