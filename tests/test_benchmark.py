@@ -28,7 +28,7 @@ class Benchmarker:
     for i in range(reps):
       start = time.time()
       output = self.run(args)
-      print output
+      #print output
       if not output_parser:
         if IGNORE_COMPILATION:
           curr = float(re.search('took +([\d\.]+) milliseconds', output).group(1)) / 1000
@@ -136,9 +136,9 @@ try:
   benchmarkers_error = ''
   benchmarkers = [
     NativeBenchmarker('clang', CLANG_CC, CLANG),
-    #JSBenchmarker('sm-asmjs', SPIDERMONKEY_ENGINE, ['-s', 'PRECISE_F32=2']),
-    #JSBenchmarker('sm-wasm',  SPIDERMONKEY_ENGINE, ['-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1']),
-    JSBenchmarker('v8-wasm',  V8_ENGINE,           ['-O0', '-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1']),
+    JSBenchmarker('sm-asmjs', SPIDERMONKEY_ENGINE, ['-s', 'PRECISE_F32=2']),
+    JSBenchmarker('sm-wasm',  SPIDERMONKEY_ENGINE, ['-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1']),
+    JSBenchmarker('v8-wasm',  V8_ENGINE,           ['-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1']),
     JSBenchmarker('v8-asmjs',  V8_ENGINE,           []),
     #JSBenchmarker('v8-asmjs-separated',  V8_ENGINE,      ['--separate-asm']),
   ]

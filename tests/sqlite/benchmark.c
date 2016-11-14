@@ -3,7 +3,23 @@
 #include <stdlib.h>
 #include <sqlite3.h>
 
+#ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#else
+#include <errno.h>
+#include <string.h>
+const double nsec_per_msec = 1000.0 * 1000.0;
+const double msec_per_sec = 1000.0;
+
+double emscripten_get_now() {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts)) {
+    fprintf(stderr, "clock_gettime failed: %s\n", strerror(errno));
+    exit(1);
+  }
+  return ts.tv_sec * msec_per_sec + (ts.tv_nsec / nsec_per_msec);
+}
+#endif
 
 int print = 1;
 
@@ -131,4 +147,3 @@ int main(int argc, char **argv){
 
   return test();
 }
-

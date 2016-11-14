@@ -647,6 +647,7 @@ class RunnerCore(unittest.TestCase):
     for engine in js_engines:
       #print 'test in', engine
       js_output = self.run_generated_code(engine, filename + '.o.js', args, output_nicerizer=output_nicerizer, assert_returncode=assert_returncode)
+      #print js_output
       try:
         self.assertContained(expected_output, js_output.replace('\r\n', '\n'))
         self.assertNotContained('ERROR', js_output)
