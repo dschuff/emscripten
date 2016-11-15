@@ -1195,8 +1195,6 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
         debug_level = max(1, debug_level) # keep whitespace readable, for asm.js parser simplicity
         shared.Settings.GLOBAL_BASE = 1024 # leave some room for mapping global vars
         assert not shared.Settings.SPLIT_MEMORY, 'WebAssembly does not support split memory'
-        if not shared.Settings.BINARYEN_METHOD:
-          shared.Settings.BINARYEN_METHOD = 'native-wasm,interpret-binary'
         assert not shared.Settings.INCLUDE_FULL_LIBRARY, 'The WebAssembly libc overlaps with JS libs, so INCLUDE_FULL_LIBRARY does not just work (FIXME)'
         # if root was not specified in -s, it might be fixed in ~/.emscripten, copy from there
         if not shared.Settings.BINARYEN_ROOT:
@@ -2022,6 +2020,8 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
             cmd += ['--mem-init=' + memfile]
             if not shared.Settings.RELOCATABLE:
               cmd += ['--mem-base=' + str(shared.Settings.GLOBAL_BASE)]
+          if shared.Settings.BINARYEN_MEM_MAX >= 0:
+            cmd += ['--mem-max=' + str(shared.Settings.BINARYEN_MEM_MAX)]
           if shared.Building.is_wasm_only():
             cmd += ['--wasm-only'] # this asm.js is code not intended to run as asm.js, it is only ever going to be wasm, an can contain special fastcomp-wasm support
           logging.debug('asm2wasm (asm.js => WebAssembly): ' + ' '.join(cmd))
