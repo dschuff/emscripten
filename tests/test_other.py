@@ -398,6 +398,17 @@ f.close()
       os.chdir(path_from_root('tests')) # Move away from the directory we are about to remove.
       shutil.rmtree(tempdirname)
 
+  def test_emcc_cflags(self):
+    # see we print them out
+    output = Popen([PYTHON, EMCC, '--cflags'], stdout=PIPE, stderr=PIPE).communicate()
+    flags = output[0].strip()
+    self.assertContained(' '.join(COMPILER_OPTS), flags)
+    # check they work
+    cmd = [CLANG, path_from_root('tests', 'hello_world.cpp')] + flags.split(' ') + ['-c', '-emit-llvm', '-o', 'a.bc']
+    subprocess.check_call(cmd)
+    subprocess.check_call([PYTHON, EMCC, 'a.bc'])
+    self.assertContained('hello, world!', run_js(self.in_dir('a.out.js')))
+
   def test_emar_em_config_flag(self):
     # We expand this in case the EM_CONFIG is ~/.emscripten (default)
     config = os.path.expanduser(EM_CONFIG)
@@ -854,6 +865,33 @@ This pointer might make sense in another type signature:''', '''Invalid function
     self.assertContained('hello from lib', run_js(aout))
 
     assert not os.path.exists('a.out') and not os.path.exists('a.exe'), 'Must not leave unneeded linker stubs'
+
+  def test_commons_link(self):
+    open('a.h', 'w').write(r'''
+#if !defined(A_H)
+#define A_H
+extern int foo[8];
+#endif
+''')
+    open('a.c', 'w').write(r'''
+#include "a.h"
+int foo[8];
+''')
+    open('main.c', 'w').write(r'''
+#include <stdio.h>
+#include "a.h"
+
+int main() {
+    printf("|%d|\n", foo[0]);
+    return 0;
+}
+''')
+
+    subprocess.check_call([PYTHON, EMCC, '-o', 'a.o', 'a.c'])
+    subprocess.check_call([PYTHON, EMAR, 'rv', 'library.a', 'a.o'])
+    subprocess.check_call([PYTHON, EMCC, '-o', 'main.o', 'main.c'])
+    subprocess.check_call([PYTHON, EMCC, '-o', 'a.js', 'main.o', 'library.a', '-s', 'ERROR_ON_UNDEFINED_SYMBOLS=1'])
+    self.assertContained('|0|', run_js('a.js'))
 
   def test_outline(self):
     if WINDOWS and not Building.which('mingw32-make'):
@@ -2630,6 +2668,251 @@ int main()
     for engine in JS_ENGINES:
       out = run_js('a.out.js', engine=engine, stderr=PIPE, full_output=True)
       self.assertContained('File size: 724', out)
+
+  def test_proxyfs(self):
+    # This test supposes that 3 different programs share the same directory and files.
+    # The same JS object is not used for each of them
+    # But 'require' function caches JS objects.
+    # If we just load same js-file multiple times like following code, 
+    # these programs (m0,m1,m2) share the same JS object.
+    #
+    #   var m0 = require('./proxyfs_test.js');
+    #   var m1 = require('./proxyfs_test.js');
+    #   var m2 = require('./proxyfs_test.js');
+    #
+    # To separate js-objects for each of them, following 'require' use different js-files.
+    #
+    #   var m0 = require('./proxyfs_test.js');
+    #   var m1 = require('./proxyfs_test1.js');
+    #   var m2 = require('./proxyfs_test2.js');
+    #
+    open('proxyfs_test_main.js', 'w').write(r'''
+var m0 = require('./proxyfs_test.js');
+var m1 = require('./proxyfs_test1.js');
+var m2 = require('./proxyfs_test2.js');
+
+var section;
+function print(str){
+  process.stdout.write(section+":"+str+":");
+}
+
+m0.FS.mkdir('/working');
+m0.FS.mount(m0.PROXYFS,{root:'/',fs:m1.FS},'/working');
+m0.FS.mkdir('/working2');
+m0.FS.mount(m0.PROXYFS,{root:'/',fs:m2.FS},'/working2');
+
+section = "child m1 reads and writes local file.";
+print("m1 read embed");
+m1.ccall('myreade','number',[],[]);
+print("m1 write");console.log("");
+m1.ccall('mywrite0','number',['number'],[1]);
+print("m1 read");
+m1.ccall('myread0','number',[],[]);
+
+
+section = "child m2 reads and writes local file.";
+print("m2 read embed");
+m2.ccall('myreade','number',[],[]);
+print("m2 write");console.log("");
+m2.ccall('mywrite0','number',['number'],[2]);
+print("m2 read");
+m2.ccall('myread0','number',[],[]);
+
+section = "child m1 reads local file.";
+print("m1 read");
+m1.ccall('myread0','number',[],[]);
+
+section = "parent m0 reads and writes local and children's file.";
+print("m0 read embed");
+m0.ccall('myreade','number',[],[]);
+print("m0 read m1");
+m0.ccall('myread1','number',[],[]);
+print("m0 read m2");
+m0.ccall('myread2','number',[],[]);
+
+section = "m0,m1 and m2 verify local files.";
+print("m0 write");console.log("");
+m0.ccall('mywrite0','number',['number'],[0]);
+print("m0 read");
+m0.ccall('myread0','number',[],[]);
+print("m1 read");
+m1.ccall('myread0','number',[],[]);
+print("m2 read");
+m2.ccall('myread0','number',[],[]);
+
+print("m0 read embed");
+m0.ccall('myreade','number',[],[]);
+print("m1 read embed");
+m1.ccall('myreade','number',[],[]);
+print("m2 read embed");
+m2.ccall('myreade','number',[],[]);
+
+section = "parent m0 writes and reads children's files.";
+print("m0 write m1");console.log("");
+m0.ccall('mywrite1','number',[],[]);
+print("m0 read m1");
+m0.ccall('myread1','number',[],[]);
+print("m0 write m2");console.log("");
+m0.ccall('mywrite2','number',[],[]);
+print("m0 read m2");
+m0.ccall('myread2','number',[],[]);
+print("m1 read");
+m1.ccall('myread0','number',[],[]);
+print("m2 read");
+m2.ccall('myread0','number',[],[]);
+print("m0 read m0");
+m0.ccall('myread0','number',[],[]);
+''')
+
+    open('proxyfs_pre.js', 'w').write(r'''
+if (typeof Module === 'undefined') Module = {};
+Module["noInitialRun"]=true;
+Module["noExitRuntime"]=true;
+''')
+
+    open('proxyfs_embed.txt', 'w').write(r'''test
+''')
+
+    open('proxyfs_test.c', 'w').write(r'''
+#include <stdio.h>
+
+int
+mywrite1(){
+  FILE* out = fopen("/working/hoge.txt","w");
+  fprintf(out,"test1\n");
+  fclose(out);
+  return 0;
+}
+
+int
+myread1(){
+  FILE* in = fopen("/working/hoge.txt","r");
+  char buf[1024];
+  int len;
+  if(in==NULL)
+    printf("open failed\n");
+
+  while(! feof(in)){
+    if(fgets(buf,sizeof(buf),in)==buf){
+      printf("%s",buf);
+    }
+  }
+  fclose(in);
+  return 0;
+}
+int
+mywrite2(){
+  FILE* out = fopen("/working2/hoge.txt","w");
+  fprintf(out,"test2\n");
+  fclose(out);
+  return 0;
+}
+
+int
+myread2(){
+  {
+    FILE* in = fopen("/working2/hoge.txt","r");
+    char buf[1024];
+    int len;
+    if(in==NULL)
+      printf("open failed\n");
+
+    while(! feof(in)){
+      if(fgets(buf,sizeof(buf),in)==buf){
+        printf("%s",buf);
+      }
+    }
+    fclose(in);
+  }
+  return 0;
+}
+
+int
+mywrite0(int i){
+  FILE* out = fopen("hoge.txt","w");
+  fprintf(out,"test0_%d\n",i);
+  fclose(out);
+  return 0;
+}
+
+int
+myread0(){
+  {
+    FILE* in = fopen("hoge.txt","r");
+    char buf[1024];
+    int len;
+    if(in==NULL)
+      printf("open failed\n");
+
+    while(! feof(in)){
+      if(fgets(buf,sizeof(buf),in)==buf){
+        printf("%s",buf);
+      }
+    }
+    fclose(in);
+  }
+  return 0;
+}
+
+int
+myreade(){
+  {
+    FILE* in = fopen("proxyfs_embed.txt","r");
+    char buf[1024];
+    int len;
+    if(in==NULL)
+      printf("open failed\n");
+
+    while(! feof(in)){
+      if(fgets(buf,sizeof(buf),in)==buf){
+        printf("%s",buf);
+      }
+    }
+    fclose(in);
+  }
+  return 0;
+}
+''')
+
+    Popen([PYTHON, EMCC,
+           '-o', 'proxyfs_test.js', 'proxyfs_test.c',
+           '--embed-file', 'proxyfs_embed.txt', '--pre-js', 'proxyfs_pre.js',
+           '-s', 'MAIN_MODULE=1']).communicate()
+    # Following shutil.copyfile just prevent 'require' of node.js from caching js-object.
+    # See https://nodejs.org/api/modules.html
+    shutil.copyfile('proxyfs_test.js', 'proxyfs_test1.js')
+    shutil.copyfile('proxyfs_test.js', 'proxyfs_test2.js')
+    out = run_js('proxyfs_test_main.js')
+    section="child m1 reads and writes local file."
+    self.assertContained(section+":m1 read embed:test", out)
+    self.assertContained(section+":m1 write:", out)
+    self.assertContained(section+":m1 read:test0_1", out)
+    section="child m2 reads and writes local file."
+    self.assertContained(section+":m2 read embed:test", out)
+    self.assertContained(section+":m2 write:", out)
+    self.assertContained(section+":m2 read:test0_2", out)
+    section="child m1 reads local file."
+    self.assertContained(section+":m1 read:test0_1", out)
+    section="parent m0 reads and writes local and children's file."
+    self.assertContained(section+":m0 read embed:test", out)
+    self.assertContained(section+":m0 read m1:test0_1", out)
+    self.assertContained(section+":m0 read m2:test0_2", out)
+    section="m0,m1 and m2 verify local files."
+    self.assertContained(section+":m0 write:", out)
+    self.assertContained(section+":m0 read:test0_0", out)
+    self.assertContained(section+":m1 read:test0_1", out)
+    self.assertContained(section+":m2 read:test0_2", out)
+    self.assertContained(section+":m0 read embed:test", out)
+    self.assertContained(section+":m1 read embed:test", out)
+    self.assertContained(section+":m2 read embed:test", out)
+    section="parent m0 writes and reads children's files."
+    self.assertContained(section+":m0 write m1:", out)
+    self.assertContained(section+":m0 read m1:test1", out)
+    self.assertContained(section+":m0 write m2:", out)
+    self.assertContained(section+":m0 read m2:test2", out)
+    self.assertContained(section+":m1 read:test1", out)
+    self.assertContained(section+":m2 read:test2", out)
+    self.assertContained(section+":m0 read m0:test0_0", out)
 
   def check_simd(self, expected_simds, expected_out):
     if SPIDERMONKEY_ENGINE in JS_ENGINES:
@@ -6879,12 +7162,12 @@ int main() {
             (['-O2'], False, True),
             (['-O2', '--js-opts', '1'], True, False), # user asked
             (['-O2', '-s', 'EMTERPRETIFY=1'], True, False), # option forced
-            (['-O2', '-s', 'EVAL_CTORS=1'], False, False), # ctor evaller uses js opts, but is not a js opt, and doesn't force other js opts
+            (['-O2', '-s', 'EVAL_CTORS=1'], False, True), # ctor evaller turned off since only-wasm
             (['-O2', '-s', 'OUTLINING_LIMIT=1000'], True, False), # option forced
             (['-O2', '-s', "BINARYEN_METHOD='interpret-s-expr,asmjs'"], True, False), # asmjs in methods means we need good asm.js
             (['-O3'], False, True),
             (['-Os'], False, True),
-            (['-Oz'], False, False), # even though we run ctor evaller, don't run js opts, but we can't only-wasm due to ctor-evaller running js opts internally
+            (['-Oz'], False, True), # ctor evaller turned off since only-wasm
           ]:
           for option in ['BINARYEN', 'WASM']: # the two should be identical
             try_delete('a.out.js')
@@ -6974,6 +7257,11 @@ int main() {
     subprocess.check_call([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-s', 'WASM=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'TOTAL_MEMORY=' + str(16*1024*1024), '--pre-js', 'pre.js', '-s', 'ALLOW_MEMORY_GROWTH=1'])
     self.assertContained('hello, world!', run_js('a.out.js', engine=SPIDERMONKEY_ENGINE))
 
+  def test_binaryen_invalid_method(self):
+    proc = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-o', 'test.js', '-s', "BINARYEN_METHOD='invalid'"])
+    proc.communicate()
+    assert proc.returncode != 0
+
   def test_binaryen_default_method(self):
     if SPIDERMONKEY_ENGINE not in JS_ENGINES: return self.skip('cannot run without spidermonkey')
     subprocess.check_call([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-s', 'WASM=1'])
@@ -7004,13 +7292,45 @@ int main() {
           else:
             assert parts[6] == str(expect_max)
 
+  def test_binaryen_ctors(self):
+    if SPIDERMONKEY_ENGINE not in JS_ENGINES: return self.skip('cannot run without spidermonkey')
+    # ctor order must be identical to js builds, deterministically
+    open('src.cpp', 'w').write(r'''
+      #include <stdio.h>
+      struct A {
+        A() { puts("constructing A!"); }
+      };
+      A a;
+      struct B {
+        B() { puts("constructing B!"); }
+      };
+      B b;
+      int main() {}
+    ''')
+    subprocess.check_call([PYTHON, EMCC, 'src.cpp'])
+    correct = run_js('a.out.js', engine=SPIDERMONKEY_ENGINE)
+    for args in [[], ['-s', 'RELOCATABLE=1'], ['-s', 'MAIN_MODULE=1']]:
+      print args
+      subprocess.check_call([PYTHON, EMCC, 'src.cpp', '-s', 'WASM=1', '-o', 'b.out.js'] + args)
+      seen = run_js('b.out.js', engine=SPIDERMONKEY_ENGINE)
+      assert correct == seen, correct + '\n vs \n' + seen
+
   def test_wasm_targets(self):
     for f in ['a.wasm', 'a.wast']:
       process = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-o', f], stdout=PIPE, stderr=PIPE)
       out, err = process.communicate()
       print err
       assert process.returncode is not 0, 'wasm suffix is an error'
-      self.assertContained('''output file "%s" has a wasm suffix, but we cannot emit wasm by itself''' % f, err)
+      self.assertContained('''output file "%s" has a wasm suffix, but we cannot emit wasm by itself, except as a dynamic library''' % f, err)
+    # side modules do allow a wasm target
+    for opts, target in [([], 'a.out.wasm'), (['-o', 'lib.wasm'], 'lib.wasm')]:
+      # specified target
+      print target
+      self.clear()
+      subprocess.check_call([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-s', 'WASM=1', '-s', 'SIDE_MODULE=1'] + opts)
+      assert 'dylink' in open(target).read()
+      for x in os.listdir('.'):
+        assert not x.endswith('.js'), 'we should not emit js when making a wasm side module'
 
   def test_check_engine(self):
     compiler_engine = COMPILER_ENGINE
@@ -7040,3 +7360,24 @@ int main() {
     except SystemExit as e:
       caught_exit = e.code
     self.assertEqual(1, caught_exit, 'Did not catch SystemExit with bogus JS engine')
+
+  def test_error_on_missing_libraries(self):
+    env = os.environ.copy()
+    if 'EMCC_STRICT' in env: del env['EMCC_STRICT']
+
+    process = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-lsomenonexistingfile', '-s', 'STRICT=1'], stdout=PIPE, stderr=PIPE, env=env)
+    process.communicate()
+    assert process.returncode is not 0, '-llsomenonexistingfile is an error in strict mode'
+
+    process = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-lsomenonexistingfile', '-s', 'ERROR_ON_MISSING_LIBRARIES=0'], stdout=PIPE, stderr=PIPE, env=env)
+    process.communicate()
+    assert process.returncode is 0, '-llsomenonexistingfile is not an error if -s ERROR_ON_MISSING_LIBRARIES=0 is passed'
+
+    process = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-lsomenonexistingfile', '-s', 'STRICT=1', '-s', 'ERROR_ON_MISSING_LIBRARIES=0'], stdout=PIPE, stderr=PIPE, env=env)
+    process.communicate()
+    assert process.returncode is 0, '-s ERROR_ON_MISSING_LIBRARIES=0 should override -s STRICT=1'
+
+    process = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-lsomenonexistingfile', '-s', 'STRICT=0'], stdout=PIPE, stderr=PIPE, env=env)
+    process.communicate()
+    # TODO: TEMPORARY: When -s ERROR_ON_MISSING_LIBRARIES=1 becomes the default, change the following line to expect failure instead of 0.
+    assert process.returncode is 0, '-llsomenonexistingfile is not yet an error in non-strict mode'

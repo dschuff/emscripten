@@ -191,7 +191,8 @@ var ALIASING_FUNCTION_POINTERS = 0; // Whether to allow function pointers to ali
                                     // a different type. This can greatly decrease table sizes
                                     // in asm.js, but can break code that compares function
                                     // pointers across different types.
-var EMULATED_FUNCTION_POINTERS = 0; // By default we implement function pointers using asm.js
+var EMULATED_FUNCTION_POINTERS = 0; // asm.js:
+                                    // By default we implement function pointers using asm.js
                                     // function tables, which is very fast. With this option,
                                     // we implement them more flexibly by emulating them: we
                                     // call out into JS, which handles the function tables.
@@ -205,6 +206,16 @@ var EMULATED_FUNCTION_POINTERS = 0; // By default we implement function pointers
                                     //     if the fp is in the right range. Shared modules
                                     //     (MAIN_MODULE, SIDE_MODULE) do this by default.
                                     //     This requires RELOCATABLE to be set.
+                                    // wasm:
+                                    // By default we use a wasm Table for function pointers,
+                                    // which is fast and efficient. When enabling emulation,
+                                    // we also use the Table *outside* the wasm module,
+                                    // exactly as when emulating in asm.js, just replacing
+                                    // the plain JS array with a Table. However, Tables have
+                                    // some limitations currently, like not being able to
+                                    // assign an arbitrary JS method to them, which we have
+                                    // yet to work around. Another limitation is that this
+                                    // cannot yet mix with EMULATE_FUNCTION_POINTER_CASTS.
 var EMULATE_FUNCTION_POINTER_CASTS = 0; // Allows function pointers to be cast, wraps each
                                         // call of an incorrect type with a runtime correction.
                                         // This adds overhead and should not be used normally.
@@ -487,6 +498,10 @@ var LINKABLE = 0; // If set to 1, this file can be linked with others, either as
                   // LINKABLE of 0 is very useful in that we can reduce the size of the
                   // generated code very significantly, by removing everything not actually used.
 
+var STRICT = 0;   // Emscripten 'strict' build mode: Drop supporting any deprecated build options.
+                  // Set the environment variable EMCC_STRICT=1 or pass -s STRICT=1
+                  // to test that a codebase builds nicely in forward compatible manner.
+
 var WARN_ON_UNDEFINED_SYMBOLS = 1; // If set to 1, we will warn on any undefined symbols that
                                    // are not resolved by the library_*.js files. Note that
                                    // it is common in large projects to
@@ -500,6 +515,22 @@ var WARN_ON_UNDEFINED_SYMBOLS = 1; // If set to 1, we will warn on any undefined
 
 var ERROR_ON_UNDEFINED_SYMBOLS = 0; // If set to 1, we will give a compile-time error on any
                                     // undefined symbols (see WARN_ON_UNDEFINED_SYMBOLS).
+
+                                    // The default value for this is currently 0, but will be
+                                    // transitioned to 1 in the future. To keep relying on
+                                    // building with -s ERROR_ON_UNDEFINED_SYMBOLS=0 setting,
+                                    // prefer to set that option explicitly in your build system.
+
+var ERROR_ON_MISSING_LIBRARIES = 0; // If set to 1, any -lfoo directives pointing to nonexisting
+                                    // library files will issue a linker error.
+
+                                    // The default value for this is currently 0, but will be
+                                    // transitioned to 1 in the future. To keep relying on
+                                    // building with -s ERROR_ON_MISSING_LIBRARIES=0 setting,
+                                    // prefer to set that option explicitly in your build system.
+
+var SYSTEM_JS_LIBRARIES = []; // Specifies a list of Emscripten-provided JS libraries to link against.
+                              // (internal, use -lfoo or -lfoo.js to link to Emscripten system JS libraries)
 
 var SMALL_XHR_CHUNKS = 0; // Use small chunk size for binary synchronous XHR's in Web Workers.
                           // Used for testing.
@@ -551,10 +582,11 @@ var FINALIZE_ASM_JS = 1; // If 1, will finalize the final emitted code, includin
                          // that prevent later js optimizer passes from running, like
                          // converting +5 into 5.0 (the js optimizer sees 5.0 as just 5).
 
-var SWAPPABLE_ASM_MODULE = 0; // If 1, then all exports from the asm.js module will be accessed
-                              // indirectly, which allow the asm module to be swapped later.
-                              // Note: It is very important to build the two modules that
-                              // are to be swapped with the same optimizations and so forth,
+var SWAPPABLE_ASM_MODULE = 0; // If 1, then all exports from the asm/wasm module will be accessed
+                              // indirectly, which allow the module to be swapped later,
+                              // simply by replacing Module['asm'].
+                              // Note: It is very important that the replacement module be
+                              // built with the same optimizations and so forth,
                               // as we depend on them being a drop-in replacement for each
                               // other (same globals on the heap at the same locations, etc.)
 
@@ -656,6 +688,9 @@ var BINARYEN_PASSES = ""; // A comma-separated list of passes to run in the bina
 var BINARYEN_MEM_MAX = -1; // Set the maximum size of memory in the wasm module (in bytes).
                            // Without this, TOTAL_MEMORY is used (as it is used for the initial value),
                            // or if memory growth is enabled, no limit is set. This overrides both of those.
+var BINARYEN_ASYNC_COMPILATION = 0; // Whether to compile the wasm asynchronously, which is more
+                                    // efficient. This is off by default in unoptimized builds and
+                                    // on by default in optimized ones.
 var BINARYEN_ROOT = ""; // Directory where we can find Binaryen. Will be automatically set for you,
                         // but you can set it to override if you are a Binaryen developer.
 
@@ -775,8 +810,18 @@ var BUNDLED_CD_DEBUG_FILE = ""; // Path to the CyberDWARF debug file passed to t
 
 var TEXTDECODER = 1; // Is enabled, use the JavaScript TextDecoder API for string marshalling.
                      // Enabled by default, set this to 0 to disable.
+
 var OFFSCREENCANVAS_SUPPORT = 0; // If set to 1, enables support for transferring canvases to pthreads and creating WebGL contexts in them,
                                  // as well as explicit swap control for GL contexts. This needs browser support for the OffscreenCanvas
                                  // specification.
 
-// Reserved: variables containing POINTER_MASKING.
+var FETCH_DEBUG = 0; // If nonzero, prints out debugging information in library_fetch.js
+
+var FETCH = 0; // If nonzero, enables emscripten_fetch API.
+
+var ASMFS = 0; // If set to 1, uses the multithreaded filesystem that is implemented within the asm.js module, using emscripten_fetch. Implies -s FETCH=1.
+
+var WASM_TEXT_FILE = ''; // name of the file containing wasm text, if relevant
+var WASM_BINARY_FILE = ''; // name of the file containing wasm binary, if relevant
+var ASMJS_CODE_FILE = ''; // name of the file containing asm.js, if relevant
+
