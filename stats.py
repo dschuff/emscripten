@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
+from collections import namedtuple
 import sys
-from tools import webassembly
+from tools import extract_metadata, webassembly
 
 VERBOSE = False
 
 
-def get_direct(filename):
+def get_direct(module):
     functions = module.get_function_types()
     segments = module.get_elem_segments()
     print(f'{len(functions)} functions, {len(segments)} segments, {segments[0].count} elems')
@@ -45,9 +46,9 @@ def elem_stats(functions: dict[str, webassembly.FuncType], segments, names):
 def get_symtab(module):
     symtab = module.get_symtab()
     print(f'{len(symtab)} symbols')
-    for sym in symtab:
+    for i, sym in enumerate(symtab):
         if VERBOSE:
-            print(f'sym {sym}')
+            print(f'sym {i}: {sym}')
     return symtab
 
 
@@ -65,13 +66,13 @@ class CodeMap:
         self.num_imported_funcs = module.num_imported_funcs()
 
         last = self.function_bodies[0].offset - 1
-        for func in self.function_bodies:
+        for i, func in enumerate(self.function_bodies):
             assert func.offset >= last + 1, f'offset mismatch: {func.offset} {last}'
             last = func.offset + func.size
             if VERBOSE:
-                print(f'func {func.offset} {func.size}')
+                print(f'func body fnidx {i + self.num_imported_funcs} @{func.offset} ({func.size})')
 
-    def search(self, addr) -> webassembly.FunctionBody:
+    def search(self, addr) -> int:
         addr += self.code_sec_offset
 
         def isearch(start, end):
@@ -92,26 +93,90 @@ class CodeMap:
         return result + self.num_imported_funcs
 
 
+class DataMapSymtab:
+    def __init__(self, module, datamap):
+        self.addrsegments = []
+        Segment = namedtuple('Segment', ['address', 'size', 'orig_index'])
+        symtab = module.get_symtab()
+        last = 0
+        for i, sym in enumerate(symtab):
+            if sym.kind != webassembly.SymbolKind.DATA:
+                continue
+            address = datamap.addresses[sym.index] + sym.offset
+            self.addrsegments.append(Segment(address, sym.size, i))
+        self.addrsegments.sort(key=lambda x: x.address)
+        for i, sym in enumerate(self.addrsegments):
+            if VERBOSE:
+                print(f'datasym {i}({sym.orig_index}) @{sym.address}-{sym.address + sym.size} ({sym.size})')
+                if sym.address > last:
+                    print(f' gap: {sym.address - last - 1}')
+            #assert sym.address >= last, f'offset mismatch: {sym.address} {last}'
+            if sym.address < last:
+                last_sym = self.addrsegments[i-1]
+                kind = 'partial'
+                if last_sym.address == sym.address and last_sym.size == sym.size:
+                    kind = 'full'
+                elif last_sym.address + last_sym.size == sym.address + sym.size:
+                    kind = 'suffix'
+                elif last_sym.address == sym.address:
+                    kind = 'prefix'
+                elif sym.size == 0:
+                    kind = 'zero'
+                print(f'symbol overlap: {kind}')
+            last = sym.address + sym.size
+    
+    def search(self, addr) -> int:
+        def isearch(start, end):
+            i = (end + start) // 2
+            if addr >= self.addrsegments[i].address + self.addrsegments[i].size:
+                if start == len(self.addrsegments):
+                    raise Exception('addr too large')
+                return isearch(i + 1, end)
+            elif addr < self.addrsegments[i].address:
+                if end == 0:
+                    raise Exception('addr too small')
+                return isearch(start, i)
+            else:
+                return i
+        result = isearch(0, len(self.addrsegments))
+        return self.addrsegments[result].orig_index
+
+
 class DataMap:
     def __init__(self, module):
         self.data_segments = module.get_segments()
+        self.addresses = []
         
-        last = self.data_segments[0].offset - 1
         for seg in self.data_segments:
-            assert seg.offset >= last + 1, f'offset mismatch: {seg.offset} {last}'
-            last = seg.offset + seg.size
-            if VERBOSE:
-                print(f'dataseg {seg.offset} {seg.size}')
+            offset = None
+            if seg.init:
+                offset = extract_metadata.to_unsigned(extract_metadata.get_const_expr_value(seg.init))
+                self.addresses.append(offset)
+            else:
+                passive_offset_map = extract_metadata.get_passive_segment_offsets(module)
+                self.addresses.append(passive_offset_map[seg])
+        assert len(self.addresses) == len(self.data_segments)
 
-    def search(self, addr) -> webassembly.DataSegment:
+        last = self.addresses[0] - 1
+        for idx, address in enumerate(self.addresses):
+            assert address >= last, f'offset mismatch: {address} {last}'
+            seg = self.data_segments[idx]
+            
+            if VERBOSE:
+                print(f'dataseg {idx} @{address}-{address + seg.size} ({seg.size})')
+                if address > last + 1:
+                    print(f' gap: {address - last - 1}')
+            last = address + seg.size
+
+    def search(self, addr) -> int:
 
         def isearch(start, end):
             i = (end + start) // 2
-            if addr >= self.data_segments[i].offset + self.data_segments[i].size:
-                if start == len(self.data_segments):
+            if addr >= self.addresses[i] + self.data_segments[i].size:
+                if start == len(self.addresses):
                     raise Exception(f'addr {addr} too large')
                 return isearch(i + 1, end)
-            elif addr < self.data_segments[i].offset:
+            elif addr < self.addresses[i]:
                 if end == 0:
                     raise Exception(f'addr {addr} too small, at {i}, {self.data_segments[i]}')
                 return isearch(start, i)
@@ -119,18 +184,19 @@ class DataMap:
                 return i
         result = isearch(0, len(self.data_segments))
         segment = self.data_segments[result]
-        assert addr >= segment.offset and addr < segment.offset + segment.size
-        return result # + self.num_imported_funcs       
+        assert addr >= self.addresses[result] and addr < self.addresses[result] + segment.size
+        return result
 
 
 class Symtab:
     def __init__(self, module):
         self.symtab = module.get_symtab()
-
-    def sym_by_name(self, name) -> webassembly.SymInfo:
+        self.name_map = {}
         for sym in self.symtab:
-            if sym.name == name:
-                return sym
+            self.name_map[sym.name] = sym
+
+    def sym_by_name(self, name: str) -> webassembly.SymInfo:
+        return self.name_map.get(name)
         return None
         raise Exception(f'symbol {name} not found')
 
@@ -154,24 +220,26 @@ class Callgraph:
     def __init__(self, module):
         self.nodes = {}
 
-    def get(self, kind, index, name):
+    def get(self, kind: webassembly.SymbolKind, index: int, name: str):
         return self.nodes.get((kind, index), CallgraphNode(kind, index, name))
 
 
 def symtab_stats(module):
+    names = module.get_names()
     symtab = get_symtab(module)
     Tab = Symtab(module)
     code_relocs = module.get_relocs('CODE')
     data_relocs = module.get_relocs('DATA')
     func_map = CodeMap(module)
     data_map = DataMap(module)
+    dms = DataMapSymtab(module, data_map)
     callgraph = Callgraph(module)
     
     for reloc in code_relocs:
         if VERBOSE:
             print(f'CODE reloc off {reloc.offset} idx {reloc.index} type {webassembly.RelocType(reloc.reloc_type).name} sym {symtab[reloc.index]}')
         if reloc.reloc_type != webassembly.RelocType.TYPE_INDEX_LEB and reloc.reloc_type != webassembly.RelocType.GLOBAL_INDEX_LEB:
-            source = func_map.search(reloc.offset)
+            source: int = func_map.search(reloc.offset)
             fname = names[source]
             ssym = Tab.sym_by_name(fname)
             if VERBOSE:
@@ -190,12 +258,20 @@ def symtab_stats(module):
             # TODO check that reloc type matches type of symbol
                  
     for reloc in data_relocs:
-        print(f'DATA reloc idx {reloc.index} name {symtab[reloc.index]}')
+        print(f'DATA reloc off {reloc.offset} idx {reloc.index} name {symtab[reloc.index]}')
         assert reloc.reloc_type != webassembly.RelocType.TYPE_INDEX_LEB
-        source = data_map.search(reloc.offset)
-        snode = callgraph.get(webassembly.SymbolKind.DATA, source, names[source])
+        data_section = module.get_section(webassembly.SecType.DATA)
+        if reloc.offset > data_section.size:
+            print(f'  reloc offset {reloc.offset} > data section size {data_section.size}')
+            sys.exit(1)
+        #source = data_map.search(reloc.offset)
+        continue
+        source = dms.search(reloc.offset)
+        print(source)
+        name = symtab[source].name
+        snode = callgraph.get(webassembly.SymbolKind.DATA, source, name)
         dsym = symtab[reloc.index]
-        dnode = callgraph.get(dsym.ind, dsym.index, dsym.name)
+        dnode = callgraph.get(dsym.kind, dsym.index, dsym.name)
         if 'TABLE_INDEX' in reloc.reloc_type.name:
             snode.add_indirect_edge(dnode)
         else:
@@ -208,18 +284,32 @@ def check_names(module):
     names = module.get_names()
     symtab = module.get_symtab()
     for sym in symtab:
-        print(sym)
         if sym.kind != webassembly.SymbolKind.FUNCTION:
             continue
         if sym.name != names[sym.index]:
-            print(f'name mismatch: Sym {sym.name} index {sym.index} name {names[sym.index]}')
+            def san(s):
+                return s.replace('C1', '##').replace('C2', '##').replace('D1', '##').replace('D2', '##')
+            # There are a bunch of symbols that from eyeballing seem to be the result of some kind of deduping or aliasing
+            if san(sym.name) != san(names[sym.index]):
+                print(f'name mismatch: Sym {sym.name} func index {sym.index} name {names[sym.index]}')
+
+
+def main(argv):
+    with webassembly.Module(argv[1]) as module:
+        functions, segments, names = get_direct(module)
+        #elem_stats(functions, segments, names)
+        check_names(module)
+        symtab_stats(module)
 
 
 if __name__ == '__main__':
     if '-v' in sys.argv:
         VERBOSE = True
-    with webassembly.Module(sys.argv[1]) as module:
-        functions, segments, names = get_direct(module)
-        elem_stats(functions, segments, names)
-        check_names(module)
-        symtab_stats(module)
+    if '-p' in sys.argv:
+        import cProfile
+        with cProfile.Profile() as pr:
+            main(sys.argv)
+        pr.print_stats()
+    else:
+        main(sys.argv)
+
