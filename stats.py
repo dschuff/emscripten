@@ -44,8 +44,6 @@ def elem_stats(functions: dict[str, webassembly.FuncType], segments, names):
     print(f'Missing: {missing}')
 
 
-
-
 def get_symtab(module):
     symtab = module.get_symtab()
     print(f'{len(symtab)} symbols')
@@ -96,59 +94,37 @@ class CodeMap:
         return result + self.num_imported_funcs
 
 
-class DataMapSymtab:
-    # What this class actually needs to be is have the same searching based on segments, but this tracks which symbols cover each segment
-    # (or each part of a segment). There needs to be one callgraph node per segment. and data relocs sourced (by offset) from this segment
-    # will naturally map to it. but it can be targeted (by symbol index) via any symbol that overlaps the segment.
-    # so the 'search' can just be the data segment search. but something has to store and check which segment each symbol maps to, and
-    # all destination nodes get mapped
-    def __init__(self, module, datamap):
-        self.addrsegments = []
-        Segment = namedtuple('Segment', ['offset', 'size', 'symtab_index'])
-        symtab = module.get_symtab()
-        last = 0
-        for i, sym in enumerate(symtab):
-            if sym.kind != webassembly.SymbolKind.DATA or sym.flags & webassembly.SymbolFlags.SYM_UNDEFINED:
-                continue
-            offset = datamap.datasec_offsets[sym.index] + sym.offset
-            self.addrsegments.append(Segment(offset, sym.size, i))
-        self.addrsegments.sort(key=lambda x: x.offset)
-        for i, sym in enumerate(self.addrsegments):
-            if VERBOSE:
-                print(f'datasym {i}({sym.symtab_index}) @{sym.offset}-{sym.offset + sym.size} ({sym.size}b)')
-                if sym.offset > last:
-                    print(f' gap: {sym.offset - last - 1}')
-            #assert sym.address >= last, f'offset mismatch: {sym.address} {last}'
-            if sym.offset < last:
-                last_sym = self.addrsegments[i-1]
-                kind = 'partial!'
-                if last_sym.offset == sym.offset and last_sym.size == sym.size:
-                    kind = 'full'
-                elif last_sym.offset + last_sym.size == sym.offset + sym.size:
-                    kind = 'suffix'
-                elif last_sym.offset == sym.offset:
-                    kind = 'prefix'
-                elif sym.size == 0:
-                    kind = 'zero'
-                if VERBOSE or kind == 'partial!':
-                    print(f'symbol overlap: {kind}')
-            last = sym.offset + sym.size
-    
-    def search(self, addr) -> int:
-        def isearch(start, end):
-            i = (end + start) // 2
-            if addr >= self.addrsegments[i].address + self.addrsegments[i].size:
-                if start == len(self.addrsegments):
-                    raise Exception('addr too large')
-                return isearch(i + 1, end)
-            elif addr < self.addrsegments[i].address:
-                if end == 0:
-                    raise Exception('addr too small')
-                return isearch(start, i)
-            else:
-                return i
-        result = isearch(0, len(self.addrsegments))
-        return self.addrsegments[result].symtab_index
+def check_data_syms(module, datamap):
+    addrsegments = []
+    Segment = namedtuple('Segment', ['offset', 'size', 'symtab_index'])
+    symtab = module.get_symtab()
+    last = 0
+    for i, sym in enumerate(symtab):
+        if sym.kind != webassembly.SymbolKind.DATA or sym.flags & webassembly.SymbolFlags.SYM_UNDEFINED:
+            continue
+        offset = datamap.datasec_offsets[sym.index] + sym.offset
+        addrsegments.append(Segment(offset, sym.size, i))
+    addrsegments.sort(key=lambda x: x.offset)
+    for i, sym in enumerate(addrsegments):
+        if VERBOSE:
+            print(f'datasym {i}({sym.symtab_index}) @{sym.offset}-{sym.offset + sym.size} ({sym.size}b)')
+            if sym.offset > last:
+                print(f' gap: {sym.offset - last - 1}')
+        #assert sym.address >= last, f'offset mismatch: {sym.address} {last}'
+        if sym.offset < last:
+            last_sym = addrsegments[i-1]
+            kind = 'partial!'
+            if last_sym.offset == sym.offset and last_sym.size == sym.size:
+                kind = 'full'
+            elif last_sym.offset + last_sym.size == sym.offset + sym.size:
+                kind = 'suffix'
+            elif last_sym.offset == sym.offset:
+                kind = 'prefix'
+            elif sym.size == 0:
+                kind = 'zero'
+            if VERBOSE or kind == 'partial!':
+                print(f'symbol overlap: {kind}')
+        last = sym.offset + sym.size
 
 
 def segment_from_symbol(module, symindex):
@@ -246,7 +222,7 @@ class Callgraph:
         self.nodes = {}
 
     def get(self, kind: webassembly.SymbolKind, index: int, name: str):
-        return self.nodes.get((kind, index), CallgraphNode(kind, index, name))
+        return self.nodes.setdefault((kind, index), CallgraphNode(kind, index, name))
     
     def get_existing_func(self, index):
         return self.nodes[(webassembly.SymbolKind.FUNCTION, index)]
@@ -265,7 +241,7 @@ def symtab_stats(module):
     data_relocs = module.get_relocs('DATA')
     func_map = CodeMap(module)
     data_map = DataMap(module)
-    dms = DataMapSymtab(module, data_map)
+    check_data_syms(module, data_map)
     callgraph = Callgraph(module)
     
     for reloc in code_relocs:
@@ -315,13 +291,28 @@ def symtab_stats(module):
             snode.add_edge(dnode)
         print(f'{snode.name} (D) -> {dsym.name} ({webassembly.SymbolKind(dsym.kind).name}) via {reloc.reloc_type.name}')
 
+        return callgraph
+
     
 def elem_data_stats(module: webassembly.Module, callgraph: Callgraph):
     segments = module.get_elem_segments()
-    assert len(segments) == 0
+    assert len(segments) == 1
     segment = segments[0]
     symtab = module.get_symtab()
+    indirect_reachable_functions = {}
     
+    for node in callgraph.nodes.values():
+        for dest in node.indirect_edges:
+            if dest.kind == webassembly.SymbolKind.FUNCTION:
+                count = indirect_reachable_functions.get(dest.name, 0)
+                indirect_reachable_functions[dest.name] = count + 1
+    total = len(indirect_reachable_functions)
+    print(f'{total} indirectly-reachable functions')
+    funcs = list(indirect_reachable_functions.keys())
+    funcs.sort(key=lambda x:indirect_reachable_functions[x])
+    for func in funcs:
+        print(f' irf {func} reached by {indirect_reachable_functions[func]}')
+
     for elem in segment.elems:
         pass 
         # get the callgraph node for the elem
@@ -348,7 +339,8 @@ def main(argv):
         functions, segments, names = get_direct(module)
         elem_stats(functions, segments, names)
         check_names(module)
-        symtab_stats(module)
+        callgraph = symtab_stats(module)
+        elem_data_stats(module, callgraph)
 
 
 if __name__ == '__main__':
