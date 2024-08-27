@@ -34,6 +34,8 @@ jobs:
               if (!match) {
                 throw new Error('Malformed release version');
               }
+              console.log(context.repo.owner);
+              console.log(context.repo.repo);
               await github.rest.git.createRef({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
