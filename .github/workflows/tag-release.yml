@@ -38,3 +38,9 @@ jobs:
                 ref: `refs/tags/${release_version}`,
                 sha: tag_sha
               });
+        - name: Create Changelog PR
+          uses: peter-evans/create-pull-request@v6
+          with:
+            title: Mark ${{ env.RELEASE_VERSION }} as released
+            body: ""
+            delete-branch: true
