@@ -18,8 +18,11 @@ to browse the changes between the tags.
 
 See docs/process.md for more on how version tagging works.
 
-3.1.66 (in development)
+3.1.67 (in development)
 -----------------------
+
+3.1.66 - 08/30/24
+-----------------
 
 3.1.65 - 08/22/24
 -----------------
