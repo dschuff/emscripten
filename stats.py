@@ -220,17 +220,42 @@ class CallgraphNode:
 class Callgraph:
     def __init__(self, module):
         self.nodes = {}
+        self.nodes_by_name = {}
 
     def get(self, kind: webassembly.SymbolKind, index: int, name: str):
         return self.nodes.setdefault((kind, index), CallgraphNode(kind, index, name))
-    
+
     def get_existing_func(self, index):
         return self.nodes[(webassembly.SymbolKind.FUNCTION, index)]
-    
-    def index_edges(self):
-        self.reverse_nodes = {}
-        for kind, index in self.nodes.keys():
-            pass
+
+    def index_nodes(self):
+        for node in self.nodes.values():
+            l = self.nodes_by_name.setdefault(node.name, [])
+            l.append(node)
+
+    def get_reachable_from_func(self, symname):
+        nodes = self.nodes_by_name[symname].filter(lambda x: x.kind == webassembly.SymbolKind.FUNCTION)
+        if not nodes:
+            raise Exception('No function nodes found for {symname}')
+        if len(nodes) > 1:
+            raise Exception('Multiple function nodes found for {symname}')
+        node = nodes[0]
+        seen_nodes = set()
+        worklist = [node]
+        while worklist:
+            cur = worklist.pop()
+            for edge in cur.direct_edges:
+                if edge not in seen_nodes:
+                    seen_nodes.add(edge)
+                    worklist.append(edge)
+            # now do the indirect edges
+            for edge in cur.indirect_edges:
+                if edge not in seen_nodes:
+                    seen_nodes.add(edge)
+                    worklist.append(edge)
+        return seen_nodes
+
+
 
 
 def symtab_stats(module):
@@ -291,7 +316,7 @@ def symtab_stats(module):
             snode.add_edge(dnode)
         print(f'{snode.name} (D) -> {dsym.name} ({webassembly.SymbolKind(dsym.kind).name}) via {reloc.reloc_type.name}')
 
-        return callgraph
+    return callgraph
 
     
 def elem_data_stats(module: webassembly.Module, callgraph: Callgraph):
@@ -341,6 +366,9 @@ def main(argv):
         check_names(module)
         callgraph = symtab_stats(module)
         elem_data_stats(module, callgraph)
+        entry = '_ZN4wasm16ModuleRunnerBaseINS_12ModuleRunnerEE10callExportENS_4NameERKNS_8LiteralsE'
+        print(f'reachable from {entry}')
+
 
 
 if __name__ == '__main__':
