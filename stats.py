@@ -95,24 +95,25 @@ class CodeMap:
 
 
 def check_data_syms(module, datamap):
-    addrsegments = []
-    Segment = namedtuple('Segment', ['offset', 'size', 'symtab_index'])
+    symsegments = []
+    # Offset is from the symbol table (offset into the data section)
+    SymbolSegment = namedtuple('SymbolSegment', ['offset', 'size', 'symtab_index'])
     symtab = module.get_symtab()
     last = 0
     for i, sym in enumerate(symtab):
         if sym.kind != webassembly.SymbolKind.DATA or sym.flags & webassembly.SymbolFlags.SYM_UNDEFINED:
             continue
-        offset = datamap.datasec_offsets[sym.index] + sym.offset
-        addrsegments.append(Segment(offset, sym.size, i))
-    addrsegments.sort(key=lambda x: x.offset)
-    for i, sym in enumerate(addrsegments):
+        global_offset = datamap.datasec_offsets[sym.index] + sym.offset
+        symsegments.append(SymbolSegment(global_offset, sym.size, i))
+    symsegments.sort(key=lambda x: x.offset)
+    for i, sym in enumerate(symsegments):
         if VERBOSE:
             print(f'datasym {i}({sym.symtab_index}) @{sym.offset}-{sym.offset + sym.size} ({sym.size}b)')
             if sym.offset > last:
                 print(f' gap: {sym.offset - last - 1}')
         #assert sym.address >= last, f'offset mismatch: {sym.address} {last}'
         if sym.offset < last:
-            last_sym = addrsegments[i-1]
+            last_sym = symsegments[i-1]
             kind = 'partial!'
             if last_sym.offset == sym.offset and last_sym.size == sym.size:
                 kind = 'full'
@@ -135,12 +136,45 @@ def segment_from_symbol(module, symindex):
     return sym.index
 
 
+class Symtab:
+    def __init__(self, module):
+        self.symtab = module.get_symtab()
+        self.name_map = {}
+        self.function_syms = {}
+        self.data_syms = {}
+        for sym in self.symtab:
+            if sym.flags & (webassembly.SymbolFlags.SYM_ABSOLUTE | webassembly.SymbolFlags.SYM_UNDEFINED):
+                continue
+            self.name_map[sym.name] = sym
+            if sym.kind == webassembly.SymbolKind.FUNCTION:
+                self.function_syms[sym.index] = sym
+            elif sym.kind == webassembly.SymbolKind.DATA:
+                self.data_syms[sym.index] = sym
+        return
+        data_segments = module.get_segments()
+        self.datasec_offsets = []
+        self.segment_offsets = [seg.offset for seg in data_segments]
+        for sym in self.data_syms:
+            sym_addr = data_segments[sym.index].offset + sym.offset
+
+    def sym_by_name(self, name: str) -> webassembly.SymInfo:
+        return self.name_map.get(name)
+        return None
+        raise Exception(f'symbol {name} not found')
+
+    def sym_by_module_index(self, kind, index):
+        if kind == webassembly.SymbolKind.FUNCTION:
+            return self.function_syms[index]
+        elif kind == webassembly.SymbolKind.DATA:
+            return self.data_syms[index]
+        raise Exception(f'bad symbol kind: {webassembly.SymbolKind(kind).name}')
+
+
 class DataMap:
     def __init__(self, module):
         self.data_segments = module.get_segments()
         self.data_sec_file_offset = module.get_section(webassembly.SecType.DATA).offset
         self.datasec_offsets = []
-
         self.datasec_offsets = [seg.offset - self.data_sec_file_offset for seg in self.data_segments]
 
         last = self.datasec_offsets[0] - 1
@@ -173,35 +207,6 @@ class DataMap:
         assert addr >= self.datasec_offsets[result] and addr < self.datasec_offsets[result] + segment.size
         return result
 
-
-class Symtab:
-    def __init__(self, module):
-        self.symtab = module.get_symtab()
-        self.name_map = {}
-        self.function_syms = {}
-        self.data_syms = {}
-        for sym in self.symtab:
-            if sym.flags & (webassembly.SymbolFlags.SYM_ABSOLUTE | webassembly.SymbolFlags.SYM_UNDEFINED):
-                continue
-            self.name_map[sym.name] = sym
-            if sym.kind == webassembly.SymbolKind.FUNCTION:
-                self.function_syms[sym.index] = sym
-            elif sym.kind == webassembly.SymbolKind.DATA:
-                self.data_syms[sym.index] = sym
-
-    def sym_by_name(self, name: str) -> webassembly.SymInfo:
-        return self.name_map.get(name)
-        return None
-        raise Exception(f'symbol {name} not found')
-
-    def sym_by_module_index(self, kind, index):
-        if kind == webassembly.SymbolKind.FUNCTION:
-            return self.function_syms[index]
-        elif kind == webassembly.SymbolKind.DATA:
-            return self.data_syms[index]
-        raise Exception(f'bad symbol kind: {webassembly.SymbolKind(kind).name}')
-
-
 class CallgraphNode:
     def __init__(self, kind: webassembly.SymbolKind, index: int, name: str):
         self.kind = kind
@@ -216,6 +221,9 @@ class CallgraphNode:
     def add_indirect_edge(self, node):
         self.indirect_edges.add(node)
 
+    def __repr__(self):
+        return self.name
+
 
 class Callgraph:
     def __init__(self, module):
@@ -229,19 +237,23 @@ class Callgraph:
         return self.nodes[(webassembly.SymbolKind.FUNCTION, index)]
 
     def index_nodes(self):
+        if len(self.nodes_by_name):
+            return
         for node in self.nodes.values():
             l = self.nodes_by_name.setdefault(node.name, [])
             l.append(node)
 
-    def get_reachable_from_func(self, symname):
-        nodes = self.nodes_by_name[symname].filter(lambda x: x.kind == webassembly.SymbolKind.FUNCTION)
-        if not nodes:
-            raise Exception('No function nodes found for {symname}')
-        if len(nodes) > 1:
-            raise Exception('Multiple function nodes found for {symname}')
-        node = nodes[0]
+    def get_reachable_from_funcs(self, symnames):
+        self.index_nodes()
         seen_nodes = set()
-        worklist = [node]
+        for n in symnames:
+            nodes = [x for x in self.nodes_by_name[n] if x.kind == webassembly.SymbolKind.FUNCTION]
+            if not nodes:
+                raise Exception(f'No function nodes found for {n}')
+            if len(nodes) > 1:
+                raise Exception(f'Multiple function nodes found for {n}')
+            seen_nodes.add(nodes[0])
+        worklist = list(seen_nodes)
         while worklist:
             cur = worklist.pop()
             for edge in cur.direct_edges:
@@ -366,8 +378,22 @@ def main(argv):
         check_names(module)
         callgraph = symtab_stats(module)
         elem_data_stats(module, callgraph)
-        entry = '_ZN4wasm16ModuleRunnerBaseINS_12ModuleRunnerEE10callExportENS_4NameERKNS_8LiteralsE'
+        #entry = ['gzread', 'gzopen']
+        def setPrint(s):
+            print([f.name for f in sorted(s, key=lambda x:x.name)])
+        entry = ['foo', 'bar']
+        r = callgraph.get_reachable_from_funcs(entry)
         print(f'reachable from {entry}')
+        setPrint(r)
+        anchor = '_ZN4wasm19OptimizationOptions9runPassesERNS_6ModuleE'
+        anchor = 'baz'
+        print(f'reachable from {anchor}')
+        pr = callgraph.get_reachable_from_funcs([anchor])
+        setPrint(pr)
+        print('reachable from both (intersection)')
+        setPrint(pr & r)
+        print('difference')
+        setPrint(r - pr)
 
 
 
