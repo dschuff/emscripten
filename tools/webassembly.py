@@ -215,11 +215,14 @@ Global = namedtuple('Global', ['type', 'mutable', 'init'])
 Dylink = namedtuple('Dylink', ['mem_size', 'mem_align', 'table_size', 'table_align', 'needed', 'export_info', 'import_info', 'runtime_paths'])
 Table = namedtuple('Table', ['elem_type', 'limits'])
 FunctionBody = namedtuple('FunctionBody', ['offset', 'size'])
+# 'offset' is the offset in the file. TODO: maybe it should be the offset in the data section?
 DataSegment = namedtuple('DataSegment', ['flags', 'init', 'offset', 'size'])
 ElemSegment = namedtuple('ElemSegment', ['flags', 'init', 'offset', 'count', 'elems'])
 FuncType = namedtuple('FuncType', ['params', 'returns'])
 
+# 'index' is the wasm segment index, 'offset' is the offset within that segment
 SymInfo = namedtuple('SymInfo', ['kind', 'flags', 'index', 'name', 'offset', 'size'])
+# 'offset' is the offset (in the relevant section) of the value to rewrite
 Reloc = namedtuple('Reloc', ['target_type', 'reloc_type', 'offset', 'index'])
 
 class Module:
