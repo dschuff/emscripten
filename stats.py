@@ -2,47 +2,9 @@
 
 from collections import namedtuple
 import sys
-from tools import extract_metadata, webassembly
+from tools import webassembly
 
 VERBOSE = False
-
-
-def get_direct(module):
-    functions = module.get_function_types()
-    segments = module.get_elem_segments()
-    print(f'{len(functions)} functions, {len(segments)} segments, {segments[0].count} elems')
-    names = module.get_names()
-    print(f'{len(names)} names')
-    return functions, segments, names
-
-
-def elem_stats(functions: dict[str, webassembly.FuncType], segments, names):
-    # Are there duplicates?
-    segment = segments[0]
-    seen_elems = set()
-    duplicates = 0
-    for elem in segment.elems:
-        name = names.get(elem, '<none>')
-        if VERBOSE:
-            print(f'elem {elem}: {name}')
-        if elem in seen_elems:
-            print(f'Duplicate: {elem}: {name}')
-            duplicates += 1
-        seen_elems.add(elem)
-    print(f'Duplicates: {duplicates}')
-
-
-    # Find functions not in the table
-    missing = 0
-    for func in range(len(functions)):
-        if func not in seen_elems:
-            name = names.get(func, '<none>')
-            #name = names[func] or '<none>'
-            if VERBOSE:
-                print(f'Not in table: {func}: {name}')
-            missing += 1
-    print(f'Missing: {missing}')
-
 
 def get_symtab(module):
     symtab = module.get_symtab()
@@ -51,13 +13,6 @@ def get_symtab(module):
         if VERBOSE:
             print(f'sym {i}: {sym}')
     return symtab
-
-
-def get_relocs(module):
-    code_relocs = module.get_relocs('CODE')
-    data_relocs = module.get_relocs('DATA')
-    print(f'{len(code_relocs)} code relocs')
-    print(f'{len(data_relocs)} data relocs')
 
 
 class CodeMap:
@@ -94,7 +49,7 @@ class CodeMap:
         return result + self.num_imported_funcs
 
 
-def check_data_syms(module, symtab):
+def check_data_syms(symtab):
     last = 0
     for i, sym in enumerate(symtab.data_syms_list):
         if VERBOSE:
@@ -116,14 +71,6 @@ def check_data_syms(module, symtab):
             if VERBOSE or kind == 'partial!':
                 print(f'symbol overlap: {kind}')
         last = sym.datasec_offset + sym.sym.size
-
-
-def segment_from_symbol(module, symindex):
-    symtab = module.get_symtab()
-    sym = symtab[symindex]
-    assert sym.kind == webassembly.SymbolKind.DATA
-    assert sym.index is not None
-    return sym.index
 
 
 class Symtab:
@@ -181,8 +128,6 @@ class Symtab:
     def data_sym_from_section_offset(self, section_offset) -> int:
         def isearch(start, end):
             i = (end + start) // 2
-            print(f' isearch {section_offset}, {start}-{end}, {i}')
-            print(f'  in {section_offset}')
             data_sym = self.data_syms_list[i]
             if section_offset >= data_sym.datasec_offset + data_sym.sym.size:
                 if i < len(self.data_syms_list) - 1 and section_offset < self.data_syms_list[i + 1].datasec_offset:
@@ -202,54 +147,6 @@ class Symtab:
         result = isearch(0, len(self.data_syms_list))
         return self.data_syms_list[result].sym_index
 
-class DataMap:
-    def __init__(self, module):
-        self.data_segments = module.get_segments()
-        self.data_sec_file_offset = module.get_section(webassembly.SecType.DATA).offset
-        self.datasec_offsets = []
-        #self.datasec_offsets = [seg.offset - self.data_sec_file_offset for seg in self.data_segments]
-
-        self.symtab = Symtab(module)
-        self.data_symbols = list(self.symtab.data_syms.items())
-
-        self.data_symbols.sort(key = lambda x: x[0])
-        for i, sym in enumerate(self.data_symbols):
-            assert i == sym[0], 'Enumeration of data syms doesnt match segments'
-            self.datasec_offsets.append(sym[1].offset + self.data_segments[sym[1].index].offset - self.data_sec_file_offset)
-            print(f'sym {self.symtab.segment_index_to_sym_index[i]}: {i}:{sym[1]}, datasec_offset {self.datasec_offsets[i]}')
-        self.data_segments = self.data_symbols
-
-
-        last = self.datasec_offsets[0] - 1
-        for idx, offset in enumerate(self.datasec_offsets):
-            assert offset >= last, f'offset mismatch: {offset} {last}'
-            seg = self.data_segments[idx][1]
-            
-            if VERBOSE:
-                print(f'dataseg {idx} @{offset}-{offset + seg.size} ({seg.size})')
-                if offset > last + 1:
-                    print(f' gap: {offset - last - 1}')
-            last = offset + seg.size
-
-    def search(self, addr) -> int:
-        def isearch(start, end):
-            i = (end + start) // 2
-            print(f' isearch {addr}, {start}-{end}, {i}')
-            print(f'  in {self.datasec_offsets[i]}-{self.datasec_offsets[i] + self.data_segments[i][1].size}')
-            if addr >= self.datasec_offsets[i] + self.data_segments[i][1].size:
-                if start == len(self.datasec_offsets):
-                    raise Exception(f'addr {addr} too large')
-                return isearch(i + 1, end)
-            elif addr < self.datasec_offsets[i]:
-                if end == 0:
-                    raise Exception(f'addr {addr} too small, at {i}, {self.data_segments[i]}')
-                return isearch(start, i)
-            else:
-                return i
-        result = isearch(0, len(self.data_segments))
-        segment = self.data_segments[result][1]
-        assert addr >= self.datasec_offsets[result] and addr < self.datasec_offsets[result] + segment.size
-        return self.data_segments[result][0]
 
 class CallgraphNode:
     def __init__(self, kind: webassembly.SymbolKind, index: int, name: str):
@@ -270,7 +167,7 @@ class CallgraphNode:
 
 
 class Callgraph:
-    def __init__(self, module):
+    def __init__(self):
         self.nodes = {}
         self.nodes_by_name = {}
 
@@ -315,32 +212,28 @@ class Callgraph:
 
 
 def symtab_stats(module):
-    names = module.get_names()
-    #symtab = get_symtab(module)
     Tab = Symtab(module)
     code_relocs = module.get_relocs('CODE')
     data_relocs = module.get_relocs('DATA')
     func_map = CodeMap(module)
-    #data_map = DataMap(module)
-    check_data_syms(module, Tab)
-    callgraph = Callgraph(module)
-    
+    check_data_syms(Tab)
+    callgraph = Callgraph()
+
     for reloc in code_relocs:
         if VERBOSE:
             print(f'CODE reloc off {reloc.offset} idx {reloc.index} type {webassembly.RelocType(reloc.reloc_type).name} sym {Tab[reloc.index]}')
         if reloc.reloc_type != webassembly.RelocType.TYPE_INDEX_LEB and reloc.reloc_type != webassembly.RelocType.GLOBAL_INDEX_LEB:
             source: int = func_map.search(reloc.offset)
-            #fname = names[source]
             ssym = Tab.sym_by_module_index(webassembly.SymbolKind.FUNCTION, source)
             fname = ssym.name
-            #ssym = Tab.sym_by_name(fname)
             if VERBOSE:
                 print(f' source function {source} fname {fname} sym {ssym}')
                 print(f'  to symbol {Tab[reloc.index]}')
             if ssym and ssym.flags & webassembly.SymbolFlags.BINDING_LOCAL == 0:
                 assert ssym.index == source, f'source {source} sym {ssym}'
             dsym = Tab[reloc.index]
-            print(f'{fname} (F) -> {dsym.name} ({webassembly.SymbolKind(dsym.kind).name}) via {reloc.reloc_type.name}')
+            if VERBOSE:
+                print(f'{fname} (F) -> {dsym.name} ({webassembly.SymbolKind(dsym.kind).name}) via {reloc.reloc_type.name}')
             snode = callgraph.get(webassembly.SymbolKind.FUNCTION, source, fname)
             dnode = callgraph.get(dsym.kind, dsym.index, dsym.name)
             if 'TABLE_INDEX' in reloc.reloc_type.name:
@@ -348,7 +241,7 @@ def symtab_stats(module):
             else:
                 snode.add_edge(dnode)
             # TODO check that reloc type matches type of symbol
-                 
+
     for reloc in data_relocs:
         if VERBOSE:
             print(f'DATA reloc off {reloc.offset} idx {reloc.index} name {Tab[reloc.index]}')
@@ -357,8 +250,6 @@ def symtab_stats(module):
         if reloc.offset > data_section.size:
             print(f'  reloc offset {reloc.offset} > data section size {data_section.size}')
             sys.exit(1)
-        #source = data_map.search(reloc.offset)
-        #source = dms.search(reloc.offset)
         source = Tab.data_sym_from_section_offset(reloc.offset)
         if VERBOSE:
             print(f' source symbol {source} sym {ssym}')
@@ -372,34 +263,11 @@ def symtab_stats(module):
             snode.add_indirect_edge(dnode)
         else:
             snode.add_edge(dnode)
-        print(f'{snode.name} (D) -> {dsym.name} ({webassembly.SymbolKind(dsym.kind).name}) via {reloc.reloc_type.name}')
+        if VERBOSE:
+            print(f'{snode.name} (D) -> {dsym.name} ({webassembly.SymbolKind(dsym.kind).name}) via {reloc.reloc_type.name}')
 
     return callgraph
 
-    
-def elem_data_stats(module: webassembly.Module, callgraph: Callgraph):
-    segments = module.get_elem_segments()
-    assert len(segments) == 1
-    segment = segments[0]
-    symtab = module.get_symtab()
-    indirect_reachable_functions = {}
-    
-    for node in callgraph.nodes.values():
-        for dest in node.indirect_edges:
-            if dest.kind == webassembly.SymbolKind.FUNCTION:
-                count = indirect_reachable_functions.get(dest.name, 0)
-                indirect_reachable_functions[dest.name] = count + 1
-    total = len(indirect_reachable_functions)
-    print(f'{total} indirectly-reachable functions')
-    funcs = list(indirect_reachable_functions.keys())
-    funcs.sort(key=lambda x:indirect_reachable_functions[x])
-    for func in funcs:
-        print(f' irf {func} reached by {indirect_reachable_functions[func]}')
-
-    for elem in segment.elems:
-        pass 
-        # get the callgraph node for the elem
-        # report the # of indirect incoming edges
 
 def check_names(module):
     '''Check that symbol table names match name section names'''
@@ -419,11 +287,8 @@ def check_names(module):
 
 def main(argv):
     with webassembly.Module(argv[1]) as module:
-        functions, segments, names = get_direct(module)
-        #elem_stats(functions, segments, names)
         check_names(module)
         callgraph = symtab_stats(module)
-        elem_data_stats(module, callgraph)
         entry = ['gzread', 'gzopen']
         def setPrint(s):
             print([f.name for f in sorted(s, key=lambda x:x.name)])
