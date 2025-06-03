@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 from collections import namedtuple
 import sys
 from typing import List, Dict, Optional, NamedTuple, Set, Tuple
@@ -353,6 +354,7 @@ def symtab_stats(module: webassembly.Module) -> Callgraph:
 
 def check_names(module: webassembly.Module) -> None:
     '''Check that symbol table names match name section names'''
+    # TODO: figure out how to handle aliasing/deduping
     names: Dict[int, str] = module.get_names()
     symtab: List[webassembly.SymInfo] = module.get_symtab()
     assert len(symtab) > 0
@@ -367,49 +369,62 @@ def check_names(module: webassembly.Module) -> None:
                 print(f'name mismatch: Sym {sym.name} func index {sym.index} name {names[sym.index]}')
 
 
-def main(argv: List[str]) -> None:
-    with webassembly.Module(argv[1]) as module:
+def main(args: argparse.Namespace) -> None:
+    with webassembly.Module(args.filename) as module:
         check_names(module)
         callgraph: Callgraph = symtab_stats(module)
-        entry: List[str] = ['gzread', 'gzopen', 'gzclose']
+        entry_str: str = args.entry
+        entry: List[str] = entry_str.split(',')
         def setPrint(s: Set[CallgraphNode]) -> None:
             print(f'len = {len(s)}:')
             print([f.name for f in sorted(s, key=lambda x: x.name)])
-        #entry = ['foo', 'bar']
-        from_entry = callgraph.get_reachable_from_funcs(entry)
-        print(f'reachable from {entry}')
-        setPrint(from_entry)
-        anchor = '_ZN4wasm19OptimizationOptions9runPassesERNS_6ModuleE'
-        #anchor = 'baz'
-        from_anchor = callgraph.get_reachable_from_funcs([anchor])
-        print(f'reachable from {anchor}, len {len(from_anchor)}')
-        #setPrint(pr)
-        print('reachable from both (intersection)')
-        setPrint(from_anchor & from_entry)
-        print('difference from_entry - from_anchor')
-        setPrint(from_entry - from_anchor)
-        main_without_entry = callgraph.get_reachable_from_funcs(['__main_argc_argv'], exclude_names=list(entry))
-        print(f'len from_anchor = {len(from_anchor)}, len main_without_entry = {len(main_without_entry)}')
-        #for f in main_without_entry:
-        #    print(f'  {f.name}')
-        print('different from_entry - main_without_entry')
-        setPrint(from_entry - main_without_entry)
-        paths = callgraph.find_all_paths('__main_argc_argv', 'adler32')
-        print(f'{len(paths)} paths from main to adler32')
-        for path in [p for p in paths if anchor not in p]:
-            print(' -> '.join(node.name for node in path))
 
+        from_entry = callgraph.get_reachable_from_funcs(entry)
+        print(f'reachable from {entry}:')
+        setPrint(from_entry)
+        if args.anchor:
+            from_anchor = callgraph.get_reachable_from_funcs([args.anchor])
+            #print(f'reachable from {args.anchor}, len {len(from_anchor)}')
+            #setPrint(from_anchor)
+            print(f'reachable from both {args.anchor} and {entry} (intersection)')
+            setPrint(from_anchor & from_entry)
+            print('difference (reachable from module entry but not from anchor)')
+            setPrint(from_entry - from_anchor)
+        main_without_entry = callgraph.get_reachable_from_funcs([args.main_entry], exclude_names=list(entry))
+        print('Reachable from module entry, but not from main entry without passing through module entry:')
+        setPrint(from_entry - main_without_entry)
+        if args.path_target:
+            paths = callgraph.find_all_paths(args.main_entry, args.path_target)
+            print(f'{len(paths)} paths from main to {args.path_target}')
+            print(f'Paths not passing through module entry points {entry}')
+            for path in [p for p in paths if not any(e in [n.name for n in p] for e in entry)]:
+                print(' -> '.join(node.name for node in path))
+
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Analyze Wasm module statistics and callgraph.")
+    parser.add_argument('filename', help='Input Wasm file')
+    parser.add_argument('-e', '--entry', required=True,
+                        help='Comma-separated list of module entry point function names')
+    parser.add_argument('-m', '--main-entry', help='Main entry point function name', default='__main_argc_argv')
+    parser.add_argument('-a', '--anchor', help='Anchor function name')
+    parser.add_argument('--path-target', help='Find paths from main entry to target')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('--profile', action='store_true', help='Enable cProfile for profiling')
+    return parser.parse_args()
 
 
 if __name__ == '__main__':
-    if '-v' in sys.argv:
+    args = parse_args()
+    if args.verbose:
         VERBOSE = True
-    if '-p' in sys.argv:
+    if args.profile:
         import cProfile
         try:
             with cProfile.Profile() as pr:
-                main(sys.argv)
+                main(args)
         finally:
             pr.print_stats()
     else:
-        main(sys.argv)
+        main(args)
