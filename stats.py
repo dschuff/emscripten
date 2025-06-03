@@ -199,9 +199,19 @@ class Callgraph:
             l = self.nodes_by_name.setdefault(node.name, [])
             l.append(node)
 
-    def get_reachable_from_funcs(self, symnames: List[str]) -> Set[CallgraphNode]:
+
+    def get_reachable_from_funcs(self,
+                                 symnames: List[str],
+                                 exclude_names: Optional[List[str]] = None) -> Set[CallgraphNode]:
+        """
+        Return a list of calgraph nodes reachable from 'symnames'.
+        Exclude any paths that pass through 'exclude_names'.
+        """
         self.index_nodes()
         seen_nodes = set()
+        exclude_names = exclude_names or []
+        if any(x for x in symnames if x in exclude_names):
+            raise Exception('Overlap between entry points and excluded symbols')
         for n in symnames:
             nodes = [x for x in self.nodes_by_name[n] if x.kind == webassembly.SymbolKind.FUNCTION]
             if not nodes:
@@ -212,16 +222,73 @@ class Callgraph:
         worklist = list(seen_nodes)
         while worklist:
             cur = worklist.pop()
-            for edge in cur.direct_edges:
-                if edge not in seen_nodes:
-                    seen_nodes.add(edge)
-                    worklist.append(edge)
-            # now do the indirect edges
-            for edge in cur.indirect_edges:
-                if edge not in seen_nodes:
+            for edge in cur.direct_edges | cur.indirect_edges:
+                if edge not in seen_nodes and edge.name not in exclude_names:
                     seen_nodes.add(edge)
                     worklist.append(edge)
         return seen_nodes
+
+    def _find_all_paths_dfs(self,
+                            current_node: 'CallgraphNode',
+                            end_node: 'CallgraphNode',
+                            current_path: List['CallgraphNode'],
+                            all_paths: List[List['CallgraphNode']],
+                            explored: Set['CallgraphNode']) -> bool:
+        """
+        Helper recursive search function.
+        Returns true if a path has been found from current_node.
+        """
+        current_path.append(current_node)
+
+        if current_node == end_node:
+            all_paths.append(list(current_path)) # Add a copy of the found path
+            current_path.pop()
+            return True
+
+        # Sort neighbors for deterministic output
+        sorted_neighbors = sorted(current_node.direct_edges | current_node.indirect_edges, key=lambda n: n.name)
+        found_path = False
+        for neighbor in sorted_neighbors:
+            # Don't recurse if we already know this node has no paths to the end. If we have visited
+            # this node and found that it does have some paths, we explore it again so that we find them all.
+            # TODO: this strategy can probably be improved, e.g. by caching path suffixes
+            if neighbor not in current_path and neighbor not in explored:
+                found_path |= self._find_all_paths_dfs(neighbor, end_node, current_path, all_paths, explored)
+
+        if not found_path:
+            explored.add(current_node)
+        current_path.pop() # Backtrack: remove current_node from path before returning
+        return found_path
+
+    def find_all_paths(self, start_node_name: str, end_node_name: str) -> List[List['CallgraphNode']]:
+        """
+        Finds all callgraph paths from a node with start_node_name to a node with end_node_name.
+        """
+        self.index_nodes()
+        self.all_nodes = set()
+
+        start_nodes = self.nodes_by_name.get(start_node_name, [])
+        end_nodes = self.nodes_by_name.get(end_node_name, [])
+
+        if not start_nodes:
+            raise Exception(f'Start node "{start_node_name}" not found in callgraph.')
+        if not end_nodes:
+            raise Exception(f'End node "{end_node_name}" not found in callgraph.')
+        if len(start_nodes) > 1:
+            raise Exception(f'Multiple start nodes found for "{start_node_name}".')
+        if len(end_nodes) > 1:
+            raise Exception(f'Multiple end nodes found for "{end_node_name}".')
+
+        start_node = start_nodes[0]
+        end_node = end_nodes[0]
+
+        all_paths: List[List[CallgraphNode]] = []
+        current_path: List[CallgraphNode] = []
+
+        self._find_all_paths_dfs(start_node, end_node, current_path, all_paths, set())
+
+        return all_paths
+
 
 
 
@@ -304,22 +371,33 @@ def main(argv: List[str]) -> None:
     with webassembly.Module(argv[1]) as module:
         check_names(module)
         callgraph: Callgraph = symtab_stats(module)
-        entry: List[str] = ['gzread', 'gzopen']
+        entry: List[str] = ['gzread', 'gzopen', 'gzclose']
         def setPrint(s: Set[CallgraphNode]) -> None:
-            print([f.name for f in sorted(list(s), key=lambda x: x.name)])
+            print(f'len = {len(s)}:')
+            print([f.name for f in sorted(s, key=lambda x: x.name)])
         #entry = ['foo', 'bar']
-        r = callgraph.get_reachable_from_funcs(entry)
+        from_entry = callgraph.get_reachable_from_funcs(entry)
         print(f'reachable from {entry}')
-        setPrint(r)
+        setPrint(from_entry)
         anchor = '_ZN4wasm19OptimizationOptions9runPassesERNS_6ModuleE'
         #anchor = 'baz'
-        print(f'reachable from {anchor}')
-        pr = callgraph.get_reachable_from_funcs([anchor])
+        from_anchor = callgraph.get_reachable_from_funcs([anchor])
+        print(f'reachable from {anchor}, len {len(from_anchor)}')
         #setPrint(pr)
         print('reachable from both (intersection)')
-        setPrint(pr & r)
-        print('difference')
-        setPrint(r - pr)
+        setPrint(from_anchor & from_entry)
+        print('difference from_entry - from_anchor')
+        setPrint(from_entry - from_anchor)
+        main_without_entry = callgraph.get_reachable_from_funcs(['__main_argc_argv'], exclude_names=list(entry))
+        print(f'len from_anchor = {len(from_anchor)}, len main_without_entry = {len(main_without_entry)}')
+        #for f in main_without_entry:
+        #    print(f'  {f.name}')
+        print('different from_entry - main_without_entry')
+        setPrint(from_entry - main_without_entry)
+        paths = callgraph.find_all_paths('__main_argc_argv', 'adler32')
+        print(f'{len(paths)} paths from main to adler32')
+        for path in [p for p in paths if anchor not in p]:
+            print(' -> '.join(node.name for node in path))
 
 
 
@@ -328,8 +406,10 @@ if __name__ == '__main__':
         VERBOSE = True
     if '-p' in sys.argv:
         import cProfile
-        with cProfile.Profile() as pr:
-            main(sys.argv)
-        pr.print_stats()
+        try:
+            with cProfile.Profile() as pr:
+                main(sys.argv)
+        finally:
+            pr.print_stats()
     else:
         main(sys.argv)
