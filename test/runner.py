@@ -402,6 +402,7 @@ def parse_args():
   parser.add_argument('--crossplatform-only', action='store_true')
   parser.add_argument('--repeat', type=int, default=1,
                       help='Repeat each test N times (default: 1).')
+  parser.add_argument('--dump-tests', action='store_true', help='Dump all test names and exit')
   return parser.parse_args()
 
 
@@ -492,6 +493,12 @@ def main():
   if unmatched_tests:
     print('ERROR: could not find the following tests: ' + ' '.join(unmatched_tests))
     return 1
+
+  if options.dump_tests:
+    for mod_name, suite in suites:
+      for test in suite:
+        print(test.id().removeprefix(mod_name + '.'))
+    return 0
 
   num_failures = run_tests(options, suites)
   # Return the number of failures as the process exit code
